@@ -219,3 +219,146 @@ mod unit_tests {
         assert_eq!(ctx.get_external_fact::<i64>("test"), Some(&123));
     }
 }
+
+// Property tests for non-determinism detection
+use dtre::{NonDeterminismGuard, Operation};
+
+// Helper to create arbitrary operations
+fn arbitrary_operation() -> impl Strategy<Value = Operation> {
+    prop_oneof![
+        Just(Operation::SystemTime),
+        Just(Operation::RandomWithoutSeed),
+        Just(Operation::NetworkAccess),
+        Just(Operation::FileSystemRead),
+        Just(Operation::FileSystemWrite),
+        Just(Operation::EnvironmentVariable),
+        Just(Operation::ThreadSpawn),
+        Just(Operation::ProcessSpawn),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+    
+    /// **Feature: deterministic-transaction-replay-engine, Property 3: Non-Deterministic Operation Rejection**
+    /// **Validates: Requirements 1.5**
+    /// 
+    /// For any operation that could introduce non-deterministic behavior, the DTRE should 
+    /// reject it with an appropriate error.
+    #[test]
+    fn property_non_deterministic_operation_rejection(
+        op in arbitrary_operation()
+    ) {
+        let guard = NonDeterminismGuard::new();
+        
+        // All non-deterministic operations should be rejected in strict mode
+        let result = guard.check_operation(&op);
+        prop_assert!(result.is_err(), "Operation {:?} should be rejected", op);
+        
+        // The error should contain information about the operation
+        if let Err(e) = result {
+            let error_msg = format!("{}", e);
+            prop_assert!(
+                error_msg.contains("Non-deterministic operation"),
+                "Error message should indicate non-deterministic operation: {}",
+                error_msg
+            );
+        }
+    }
+    
+    /// **Feature: deterministic-transaction-replay-engine, Property 29: Non-Determinism Detection**
+    /// **Validates: Requirements 8.2**
+    /// 
+    /// For any non-deterministic behavior, the system should accurately detect and report 
+    /// the specific source.
+    #[test]
+    fn property_non_determinism_detection(
+        op in arbitrary_operation()
+    ) {
+        let guard = NonDeterminismGuard::new();
+        
+        // Check that the guard detects the operation
+        let result = guard.check_operation(&op);
+        prop_assert!(result.is_err(), "Non-deterministic operation {:?} should be detected", op);
+        
+        // Verify the error contains specific information about the source
+        if let Err(e) = result {
+            let error_msg = format!("{}", e);
+            
+            // The error should identify the specific operation type
+            match op {
+                Operation::SystemTime => {
+                    prop_assert!(error_msg.contains("system_time"), 
+                        "Error should identify system_time: {}", error_msg);
+                }
+                Operation::RandomWithoutSeed => {
+                    prop_assert!(error_msg.contains("unseeded_random"), 
+                        "Error should identify unseeded_random: {}", error_msg);
+                }
+                Operation::NetworkAccess => {
+                    prop_assert!(error_msg.contains("network_access"), 
+                        "Error should identify network_access: {}", error_msg);
+                }
+                Operation::FileSystemRead => {
+                    prop_assert!(error_msg.contains("file_system_read"), 
+                        "Error should identify file_system_read: {}", error_msg);
+                }
+                Operation::FileSystemWrite => {
+                    prop_assert!(error_msg.contains("file_system_write"), 
+                        "Error should identify file_system_write: {}", error_msg);
+                }
+                Operation::EnvironmentVariable => {
+                    prop_assert!(error_msg.contains("environment_variable"), 
+                        "Error should identify environment_variable: {}", error_msg);
+                }
+                Operation::ThreadSpawn => {
+                    prop_assert!(error_msg.contains("thread_spawn"), 
+                        "Error should identify thread_spawn: {}", error_msg);
+                }
+                Operation::ProcessSpawn => {
+                    prop_assert!(error_msg.contains("process_spawn"), 
+                        "Error should identify process_spawn: {}", error_msg);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod non_determinism_tests {
+    use super::*;
+    
+    #[test]
+    fn test_guard_strict_mode() {
+        let guard = NonDeterminismGuard::new();
+        
+        // All operations should be rejected in strict mode
+        assert!(guard.check_operation(&Operation::SystemTime).is_err());
+        assert!(guard.check_operation(&Operation::NetworkAccess).is_err());
+        assert!(guard.check_operation(&Operation::RandomWithoutSeed).is_err());
+    }
+    
+    #[test]
+    fn test_guard_non_strict_mode() {
+        let guard = NonDeterminismGuard::with_strict_mode(false);
+        
+        // All operations should be allowed in non-strict mode
+        assert!(guard.check_operation(&Operation::SystemTime).is_ok());
+        assert!(guard.check_operation(&Operation::NetworkAccess).is_ok());
+        assert!(guard.check_operation(&Operation::RandomWithoutSeed).is_ok());
+    }
+    
+    #[test]
+    fn test_guard_validate() {
+        let guard = NonDeterminismGuard::new();
+        
+        // Validate should reject non-deterministic operations
+        let result = guard.validate(&Operation::SystemTime, || 42);
+        assert!(result.is_err());
+        
+        // Non-strict mode should allow operations
+        let guard_permissive = NonDeterminismGuard::with_strict_mode(false);
+        let result = guard_permissive.validate(&Operation::SystemTime, || 42);
+        assert_eq!(result.unwrap(), 42);
+    }
+}
