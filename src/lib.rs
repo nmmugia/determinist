@@ -7,7 +7,9 @@ pub mod error;
 pub mod hasher;
 pub mod logging;
 pub mod replay_engine;
+pub mod result_comparison;
 pub mod rule_set;
+pub mod serialization;
 pub mod state_manager;
 pub mod traits;
 pub mod transaction_processor;
@@ -27,8 +29,13 @@ pub use logging::{
     DeterministicLogger, LogEntry, LogLevel, ExecutionTraceLog, TraceEvent, TraceEventType
 };
 pub use replay_engine::{ReplayEngine, ReplayEngineBuilder};
+pub use result_comparison::{
+    ResultComparator, ResultComparison, TransitionDifference, PerformanceComparison,
+    FieldComparison, BalanceDifference, DiffAnalyzer
+};
 pub use rule_set::{VersionedRuleSet, RuleSetRegistry, RuleSetMetadata};
+pub use serialization::{StateSerializer, BincodeSerializer, JsonSerializer, SerializationContext};
 pub use state_manager::{StateManager, Checkpoint, StateDiff};
 pub use traits::{State, Transaction, RuleSet};
 pub use transaction_processor::TransactionProcessor;
-pub use types::{Version, StateHash, ReplayResult, ExecutionTrace, StateTransition, CheckpointInfo, ImpactAnalysis, StateDifference};
+pub use types::{Version, StateHash, ReplayResult, ExecutionTrace, StateTransition, CheckpointInfo, ImpactAnalysis, StateDifference, PerformanceMetrics};
