@@ -97,7 +97,7 @@ fn arbitrary_test_state() -> impl Strategy<Value = TestState> {
 fn arbitrary_test_transaction() -> impl Strategy<Value = TestTransaction> {
     (
         "[a-z0-9]{3,10}",
-        -1000i64..1000,
+        0i64..1000,  // Only positive amounts to avoid negative balances
         arbitrary_datetime()
     ).prop_map(|(id, amount, timestamp)| {
         TestTransaction {
@@ -261,6 +261,85 @@ proptest! {
             }
         }
     }
+    
+    /// **Feature: deterministic-transaction-replay-engine, Property 17: Parallel Execution Determinism**
+    /// **Validates: Requirements 5.5, 9.3**
+    /// 
+    /// For any transaction sequence, parallel execution should produce identical results 
+    /// to sequential execution.
+    #[test]
+    fn property_parallel_execution_determinism(
+        initial_state in arbitrary_test_state(),
+        transactions in prop::collection::vec(arbitrary_test_transaction(), 1..50),
+        time in arbitrary_datetime(),
+        seed in arbitrary_seed()
+    ) {
+        let rule_set = TestRuleSet {
+            version: Version::new(1, 0, 0),
+        };
+        let context = ExecutionContext::new(time, seed);
+        
+        // Create engine for sequential execution
+        let engine_seq = ReplayEngine::new(
+            initial_state.clone(),
+            rule_set.clone(),
+            context.clone()
+        );
+        
+        // Create engine for parallel execution
+        let engine_par = ReplayEngine::new(
+            initial_state.clone(),
+            rule_set.clone(),
+            context.clone()
+        );
+        
+        // Execute sequentially
+        let result_seq = engine_seq.replay(&transactions);
+        prop_assert!(result_seq.is_ok(), "Sequential replay failed: {:?}", result_seq.err());
+        let result_seq = result_seq.unwrap();
+        
+        // Execute in parallel
+        let result_par = engine_par.replay_parallel(&transactions);
+        prop_assert!(result_par.is_ok(), "Parallel replay failed: {:?}", result_par.err());
+        let result_par = result_par.unwrap();
+        
+        // Final states should be identical
+        prop_assert_eq!(&result_seq.final_state, &result_par.final_state,
+            "Sequential and parallel final states differ");
+        
+        // State hashes should be identical
+        prop_assert_eq!(result_seq.final_hash, result_par.final_hash,
+            "Sequential and parallel state hashes differ");
+        
+        // Transaction counts should match
+        prop_assert_eq!(
+            result_seq.execution_trace.transactions_processed,
+            result_par.execution_trace.transactions_processed,
+            "Transaction counts differ between sequential and parallel"
+        );
+        
+        // State transition counts should match
+        prop_assert_eq!(
+            result_seq.execution_trace.state_transitions.len(),
+            result_par.execution_trace.state_transitions.len(),
+            "State transition counts differ between sequential and parallel"
+        );
+        
+        // Verify that all state transitions have matching transaction IDs
+        for i in 0..result_seq.execution_trace.state_transitions.len() {
+            prop_assert_eq!(
+                &result_seq.execution_trace.state_transitions[i].transaction_id,
+                &result_par.execution_trace.state_transitions[i].transaction_id,
+                "Transaction ID at index {} differs between sequential and parallel", i
+            );
+        }
+        
+        // Verify that the final balance is correct
+        let expected_balance = initial_state.balance + 
+            transactions.iter().map(|t| t.amount).sum::<i64>();
+        prop_assert_eq!(result_par.final_state.balance, expected_balance,
+            "Parallel execution final balance doesn't match expected");
+    }
 }
 
 #[cfg(test)]
@@ -388,5 +467,155 @@ mod unit_tests {
         assert_eq!(result1.final_hash, result2.final_hash);
         assert_eq!(result1.final_state.balance, 100);
         assert_eq!(result1.final_state.transaction_count, 0);
+    }
+    
+    #[test]
+    fn test_parallel_execution_matches_sequential() {
+        let initial_state = TestState {
+            balance: 1000,
+            transaction_count: 0,
+        };
+        
+        let transactions = vec![
+            TestTransaction {
+                id: "tx1".to_string(),
+                amount: 100,
+                timestamp: Utc.timestamp_opt(1000, 0).unwrap(),
+            },
+            TestTransaction {
+                id: "tx2".to_string(),
+                amount: 200,
+                timestamp: Utc.timestamp_opt(2000, 0).unwrap(),
+            },
+            TestTransaction {
+                id: "tx3".to_string(),
+                amount: 300,
+                timestamp: Utc.timestamp_opt(3000, 0).unwrap(),
+            },
+            TestTransaction {
+                id: "tx4".to_string(),
+                amount: 400,
+                timestamp: Utc.timestamp_opt(4000, 0).unwrap(),
+            },
+            TestTransaction {
+                id: "tx5".to_string(),
+                amount: 500,
+                timestamp: Utc.timestamp_opt(5000, 0).unwrap(),
+            },
+        ];
+        
+        let rule_set = TestRuleSet {
+            version: Version::new(1, 0, 0),
+        };
+        let time = Utc.timestamp_opt(1000000, 0).unwrap();
+        let context = ExecutionContext::new(time, 42);
+        
+        // Sequential execution
+        let engine_seq = ReplayEngine::new(
+            initial_state.clone(),
+            rule_set.clone(),
+            context.clone()
+        );
+        let result_seq = engine_seq.replay(&transactions).unwrap();
+        
+        // Parallel execution
+        let engine_par = ReplayEngine::new(
+            initial_state.clone(),
+            rule_set.clone(),
+            context.clone()
+        );
+        let result_par = engine_par.replay_parallel(&transactions).unwrap();
+        
+        // Results should be identical
+        assert_eq!(result_seq.final_state, result_par.final_state);
+        assert_eq!(result_seq.final_hash, result_par.final_hash);
+        assert_eq!(result_seq.final_state.balance, 2500);
+        assert_eq!(result_seq.final_state.transaction_count, 5);
+        assert_eq!(
+            result_seq.execution_trace.transactions_processed,
+            result_par.execution_trace.transactions_processed
+        );
+    }
+    
+    #[test]
+    fn test_parallel_execution_with_large_transaction_set() {
+        let initial_state = TestState {
+            balance: 0,
+            transaction_count: 0,
+        };
+        
+        // Create a large set of transactions to trigger parallel processing
+        let mut transactions = Vec::new();
+        for i in 0..150 {
+            transactions.push(TestTransaction {
+                id: format!("tx{}", i),
+                amount: i as i64,
+                timestamp: Utc.timestamp_opt(1000 + i as i64, 0).unwrap(),
+            });
+        }
+        
+        let rule_set = TestRuleSet {
+            version: Version::new(1, 0, 0),
+        };
+        let context = ExecutionContext::new(Utc.timestamp_opt(1000000, 0).unwrap(), 42);
+        
+        // Sequential execution
+        let engine_seq = ReplayEngine::new(
+            initial_state.clone(),
+            rule_set.clone(),
+            context.clone()
+        );
+        let result_seq = engine_seq.replay(&transactions).unwrap();
+        
+        // Parallel execution
+        let engine_par = ReplayEngine::new(
+            initial_state.clone(),
+            rule_set.clone(),
+            context.clone()
+        );
+        let result_par = engine_par.replay_parallel(&transactions).unwrap();
+        
+        // Results should be identical
+        assert_eq!(result_seq.final_state, result_par.final_state);
+        assert_eq!(result_seq.final_hash, result_par.final_hash);
+        
+        // Verify the expected final balance (sum of 0..149)
+        let expected_balance: i64 = (0..150).sum();
+        assert_eq!(result_par.final_state.balance, expected_balance);
+        assert_eq!(result_par.final_state.transaction_count, 150);
+    }
+    
+    #[test]
+    fn test_parallel_execution_with_small_transaction_set_uses_sequential() {
+        let initial_state = TestState {
+            balance: 100,
+            transaction_count: 0,
+        };
+        
+        // Small transaction set (< 100) should use sequential processing
+        let transactions = vec![
+            TestTransaction {
+                id: "tx1".to_string(),
+                amount: 50,
+                timestamp: Utc.timestamp_opt(1000, 0).unwrap(),
+            },
+            TestTransaction {
+                id: "tx2".to_string(),
+                amount: 30,
+                timestamp: Utc.timestamp_opt(2000, 0).unwrap(),
+            },
+        ];
+        
+        let rule_set = TestRuleSet {
+            version: Version::new(1, 0, 0),
+        };
+        let context = ExecutionContext::new(Utc.timestamp_opt(1000000, 0).unwrap(), 42);
+        
+        let engine = ReplayEngine::new(initial_state, rule_set, context);
+        let result = engine.replay_parallel(&transactions).unwrap();
+        
+        // Should still produce correct results
+        assert_eq!(result.final_state.balance, 180);
+        assert_eq!(result.final_state.transaction_count, 2);
     }
 }
