@@ -1,7 +1,7 @@
 //! State management and transition tracking
 
 use crate::context::ExecutionContext;
-use crate::error::{ProcessingError, StateError, ValidationError};
+use crate::error::{ProcessingError, StateError};
 use crate::hasher::StateHasher;
 use crate::traits::{RuleSet, State, Transaction};
 use crate::types::{StateHash, StateTransition};
@@ -185,6 +185,7 @@ impl<S: State> StateManager<S> {
 mod tests {
     use super::*;
     use crate::types::Version;
+    use crate::error::ValidationError;
     use chrono::Utc;
     use serde::{Deserialize, Serialize};
     use std::hash::{Hash, Hasher};

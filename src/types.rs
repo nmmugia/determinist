@@ -30,7 +30,7 @@ impl fmt::Display for Version {
 }
 
 /// Cryptographic hash of a state
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StateHash(pub [u8; 32]);
 
 impl fmt::Display for StateHash {
