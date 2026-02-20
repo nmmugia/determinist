@@ -174,6 +174,203 @@ impl ExternalFacts {
     }
 }
 
+/// External entity resolver for deterministic entity lookup
+#[derive(Debug, Clone)]
+pub struct ExternalEntityResolver {
+    entities: HashMap<String, EntityWrapper>,
+}
+
+struct EntityWrapper {
+    value: Box<dyn ExternalEntity>,
+    type_id: std::any::TypeId,
+}
+
+impl std::fmt::Debug for EntityWrapper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EntityWrapper")
+            .field("type_id", &self.type_id)
+            .finish()
+    }
+}
+
+impl Clone for EntityWrapper {
+    fn clone(&self) -> Self {
+        Self {
+            value: self.value.clone_box(),
+            type_id: self.type_id,
+        }
+    }
+}
+
+impl ExternalEntityResolver {
+    /// Create a new empty entity resolver
+    pub fn new() -> Self {
+        Self {
+            entities: HashMap::new(),
+        }
+    }
+    
+    /// Register an external entity with a unique identifier
+    pub fn register<T: ExternalEntity>(&mut self, entity_id: String, entity: T) {
+        let type_id = std::any::TypeId::of::<T>();
+        self.entities.insert(entity_id, EntityWrapper {
+            value: Box::new(entity),
+            type_id,
+        });
+    }
+    
+    /// Resolve an external entity by its identifier
+    pub fn resolve<T: ExternalEntity>(&self, entity_id: &str) -> Result<&T, ProcessingError> {
+        let requested_type_id = std::any::TypeId::of::<T>();
+        
+        self.entities.get(entity_id)
+            .ok_or_else(|| ProcessingError::ExternalEntityNotFound {
+                entity_id: entity_id.to_string(),
+            })
+            .and_then(|wrapper| {
+                if wrapper.type_id == requested_type_id {
+                    let any_ref: &dyn Any = &*wrapper.value;
+                    any_ref.downcast_ref::<T>()
+                        .ok_or_else(|| ProcessingError::ExternalEntityTypeMismatch {
+                            entity_id: entity_id.to_string(),
+                            expected_type: std::any::type_name::<T>().to_string(),
+                        })
+                } else {
+                    Err(ProcessingError::ExternalEntityTypeMismatch {
+                        entity_id: entity_id.to_string(),
+                        expected_type: std::any::type_name::<T>().to_string(),
+                    })
+                }
+            })
+    }
+    
+    /// Check if an entity is registered
+    pub fn contains(&self, entity_id: &str) -> bool {
+        self.entities.contains_key(entity_id)
+    }
+    
+    /// Get the number of registered entities
+    pub fn len(&self) -> usize {
+        self.entities.len()
+    }
+    
+    /// Check if the resolver is empty
+    pub fn is_empty(&self) -> bool {
+        self.entities.is_empty()
+    }
+}
+
+impl Default for ExternalEntityResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Trait for external entities that can be resolved
+pub trait ExternalEntity: Any + Send + Sync {
+    fn clone_box(&self) -> Box<dyn ExternalEntity>;
+}
+
+// Blanket implementation for all types that are Clone + Send + Sync + 'static
+impl<T> ExternalEntity for T
+where
+    T: Any + Clone + Send + Sync,
+{
+    fn clone_box(&self) -> Box<dyn ExternalEntity> {
+        Box::new(self.clone())
+    }
+}
+
+/// Ordering rules for deterministic collection iteration
+#[derive(Debug, Clone)]
+pub struct OrderingRules {
+    /// Enforce stable ordering for all collections
+    enforce_stable_ordering: bool,
+    /// Custom ordering keys for specific entity types
+    custom_orderings: HashMap<String, Vec<String>>,
+}
+
+impl OrderingRules {
+    /// Create new ordering rules with stable ordering enforced
+    pub fn new() -> Self {
+        Self {
+            enforce_stable_ordering: true,
+            custom_orderings: HashMap::new(),
+        }
+    }
+    
+    /// Create ordering rules without enforcement (for testing)
+    pub fn permissive() -> Self {
+        Self {
+            enforce_stable_ordering: false,
+            custom_orderings: HashMap::new(),
+        }
+    }
+    
+    /// Add a custom ordering for a specific entity type
+    pub fn add_ordering(&mut self, entity_type: String, ordered_ids: Vec<String>) {
+        self.custom_orderings.insert(entity_type, ordered_ids);
+    }
+    
+    /// Get the custom ordering for an entity type
+    pub fn get_ordering(&self, entity_type: &str) -> Option<&Vec<String>> {
+        self.custom_orderings.get(entity_type)
+    }
+    
+    /// Check if stable ordering is enforced
+    pub fn is_stable_ordering_enforced(&self) -> bool {
+        self.enforce_stable_ordering
+    }
+    
+    /// Validate that a collection follows the required ordering
+    pub fn validate_ordering<T>(&self, entity_type: &str, items: &[T], get_id: impl Fn(&T) -> &str) -> Result<(), ProcessingError> {
+        if !self.enforce_stable_ordering {
+            return Ok(());
+        }
+        
+        if let Some(expected_order) = self.custom_orderings.get(entity_type) {
+            let actual_order: Vec<String> = items.iter().map(|item| get_id(item).to_string()).collect();
+            
+            // Check if the actual order matches the expected order
+            if actual_order != *expected_order {
+                return Err(ProcessingError::OrderingViolation {
+                    entity_type: entity_type.to_string(),
+                    expected_order: expected_order.clone(),
+                    actual_order,
+                });
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Sort a collection according to the defined ordering rules
+    pub fn sort_by_ordering<T>(&self, entity_type: &str, items: &mut [T], get_id: impl Fn(&T) -> &str) {
+        if let Some(expected_order) = self.custom_orderings.get(entity_type) {
+            // Create a map of id to position in expected order
+            let position_map: HashMap<&str, usize> = expected_order
+                .iter()
+                .enumerate()
+                .map(|(i, id)| (id.as_str(), i))
+                .collect();
+            
+            // Sort items based on their position in the expected order
+            items.sort_by_key(|item| {
+                position_map.get(get_id(item)).copied().unwrap_or(usize::MAX)
+            });
+        } else {
+            // Default to lexicographic ordering for determinism
+            items.sort_by_key(|item| get_id(item).to_string());
+        }
+    }
+}
+
+impl Default for OrderingRules {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Default for ExternalFacts {
     fn default() -> Self {
         Self::new()
@@ -201,6 +398,8 @@ pub struct ExecutionContext {
     deterministic_time: DeterministicTime,
     seeded_random: SeededRandom,
     external_facts: ExternalFacts,
+    entity_resolver: ExternalEntityResolver,
+    ordering_rules: OrderingRules,
 }
 
 impl ExecutionContext {
@@ -210,6 +409,8 @@ impl ExecutionContext {
             deterministic_time: DeterministicTime::new(time),
             seeded_random: SeededRandom::new(random_seed),
             external_facts: ExternalFacts::new(),
+            entity_resolver: ExternalEntityResolver::new(),
+            ordering_rules: OrderingRules::new(),
         }
     }
     
@@ -238,12 +439,39 @@ impl ExecutionContext {
         &self.external_facts
     }
     
+    /// Resolve an external entity by its identifier
+    pub fn resolve_entity<T: ExternalEntity>(&self, entity_id: &str) -> Result<&T, ProcessingError> {
+        self.entity_resolver.resolve(entity_id)
+    }
+    
+    /// Get the entity resolver
+    pub fn entity_resolver(&self) -> &ExternalEntityResolver {
+        &self.entity_resolver
+    }
+    
+    /// Get the ordering rules
+    pub fn ordering_rules(&self) -> &OrderingRules {
+        &self.ordering_rules
+    }
+    
+    /// Validate ordering for a collection
+    pub fn validate_ordering<T>(&self, entity_type: &str, items: &[T], get_id: impl Fn(&T) -> &str) -> Result<(), ProcessingError> {
+        self.ordering_rules.validate_ordering(entity_type, items, get_id)
+    }
+    
+    /// Sort a collection according to ordering rules
+    pub fn sort_by_ordering<T>(&self, entity_type: &str, items: &mut [T], get_id: impl Fn(&T) -> &str) {
+        self.ordering_rules.sort_by_ordering(entity_type, items, get_id)
+    }
+    
     /// Create a new context with updated time
     pub fn with_time(&self, time: DateTime<Utc>) -> Self {
         Self {
             deterministic_time: self.deterministic_time.with_time(time),
             seeded_random: self.seeded_random.clone(),
             external_facts: self.external_facts.clone(),
+            entity_resolver: self.entity_resolver.clone(),
+            ordering_rules: self.ordering_rules.clone(),
         }
     }
 }
@@ -253,6 +481,8 @@ pub struct ExecutionContextBuilder {
     time: Option<DateTime<Utc>>,
     random_seed: Option<u64>,
     external_facts: ExternalFacts,
+    entity_resolver: ExternalEntityResolver,
+    ordering_rules: OrderingRules,
 }
 
 impl ExecutionContextBuilder {
@@ -262,6 +492,8 @@ impl ExecutionContextBuilder {
             time: None,
             random_seed: None,
             external_facts: ExternalFacts::new(),
+            entity_resolver: ExternalEntityResolver::new(),
+            ordering_rules: OrderingRules::new(),
         }
     }
     
@@ -283,6 +515,24 @@ impl ExecutionContextBuilder {
         self
     }
     
+    /// Register an external entity
+    pub fn with_external_entity<T: ExternalEntity>(mut self, entity_id: String, entity: T) -> Self {
+        self.entity_resolver.register(entity_id, entity);
+        self
+    }
+    
+    /// Add a custom ordering rule
+    pub fn with_ordering(mut self, entity_type: String, ordered_ids: Vec<String>) -> Self {
+        self.ordering_rules.add_ordering(entity_type, ordered_ids);
+        self
+    }
+    
+    /// Set ordering rules
+    pub fn with_ordering_rules(mut self, ordering_rules: OrderingRules) -> Self {
+        self.ordering_rules = ordering_rules;
+        self
+    }
+    
     /// Build the execution context
     pub fn build(self) -> ExecutionContext {
         let time = self.time.unwrap_or_else(|| Utc::now());
@@ -292,6 +542,8 @@ impl ExecutionContextBuilder {
             deterministic_time: DeterministicTime::new(time),
             seeded_random: SeededRandom::new(random_seed),
             external_facts: self.external_facts,
+            entity_resolver: self.entity_resolver,
+            ordering_rules: self.ordering_rules,
         }
     }
 }

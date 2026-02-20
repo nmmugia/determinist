@@ -13,7 +13,10 @@ pub mod transaction_processor;
 pub mod types;
 
 // Re-export core types and traits
-pub use context::{ExecutionContext, DeterministicTime, SeededRandom, ExternalFacts, ExternalFact, NonDeterminismGuard, Operation};
+pub use context::{
+    ExecutionContext, DeterministicTime, SeededRandom, ExternalFacts, ExternalFact, 
+    ExternalEntityResolver, ExternalEntity, OrderingRules, NonDeterminismGuard, Operation
+};
 pub use error::{DTREError, ProcessingError, ValidationError, StateError, RuleError, SerializationError};
 pub use hasher::StateHasher;
 pub use replay_engine::{ReplayEngine, ReplayEngineBuilder};

@@ -31,6 +31,19 @@ pub enum ProcessingError {
     
     #[error("Rule application failed: {rule_version} - {details}")]
     RuleApplicationFailed { rule_version: Version, details: String },
+    
+    #[error("External entity not found: {entity_id}")]
+    ExternalEntityNotFound { entity_id: String },
+    
+    #[error("External entity type mismatch: {entity_id} - expected {expected_type}")]
+    ExternalEntityTypeMismatch { entity_id: String, expected_type: String },
+    
+    #[error("Ordering violation for {entity_type}: expected {expected_order:?}, got {actual_order:?}")]
+    OrderingViolation { 
+        entity_type: String, 
+        expected_order: Vec<String>, 
+        actual_order: Vec<String> 
+    },
 }
 
 #[derive(Debug, Error)]
