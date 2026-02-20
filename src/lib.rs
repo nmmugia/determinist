@@ -5,6 +5,7 @@
 pub mod context;
 pub mod error;
 pub mod hasher;
+pub mod rule_set;
 pub mod state_manager;
 pub mod traits;
 pub mod types;
@@ -13,6 +14,7 @@ pub mod types;
 pub use context::{ExecutionContext, DeterministicTime, SeededRandom, ExternalFacts, ExternalFact, NonDeterminismGuard, Operation};
 pub use error::{DTREError, ProcessingError, ValidationError, StateError, RuleError, SerializationError};
 pub use hasher::StateHasher;
+pub use rule_set::{VersionedRuleSet, RuleSetRegistry, RuleSetMetadata};
 pub use state_manager::{StateManager, Checkpoint, StateDiff};
 pub use traits::{State, Transaction, RuleSet};
 pub use types::{Version, StateHash, ReplayResult, ExecutionTrace, StateTransition};
