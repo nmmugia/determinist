@@ -91,6 +91,7 @@ fn arb_replay_result() -> impl Strategy<Value = ReplayResult<TestState>> {
                 transactions_processed: tx_count,
                 state_transitions: vec![],
                 rule_applications: vec![],
+                checkpoints: vec![],
             },
             performance_metrics: PerformanceMetrics {
                 total_duration_ms: duration,

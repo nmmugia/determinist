@@ -29,10 +29,37 @@ impl<S: State> TransactionProcessor<S> {
                 transactions_processed: 0,
                 state_transitions: Vec::new(),
                 rule_applications: Vec::new(),
+                checkpoints: Vec::new(),
             },
         })
     }
     
+    
+    /// Create a transaction processor from a checkpoint
+    pub fn from_checkpoint(checkpoint: &crate::state_manager::Checkpoint<S>) -> Result<Self, ProcessingError> {
+        let mut state_manager = StateManager::new(checkpoint.state.clone())
+            .map_err(|e| ProcessingError::TransactionFailed {
+                transaction_id: "checkpoint".to_string(),
+                reason: format!("Failed to initialize state manager from checkpoint: {}", e),
+            })?;
+        
+        // Restore the checkpoint to set the transaction count
+        state_manager.restore_checkpoint(checkpoint)
+            .map_err(|e| ProcessingError::TransactionFailed {
+                transaction_id: "checkpoint".to_string(),
+                reason: format!("Failed to restore checkpoint: {}", e),
+            })?;
+        
+        Ok(Self {
+            state_manager,
+            execution_trace: ExecutionTrace {
+                transactions_processed: checkpoint.transaction_index,
+                state_transitions: Vec::new(),
+                rule_applications: Vec::new(),
+                checkpoints: Vec::new(),
+            },
+        })
+    }
     /// Process a single transaction with the given rule set and context
     pub fn process_transaction<T, R>(
         &mut self,
@@ -94,6 +121,40 @@ impl<S: State> TransactionProcessor<S> {
         Ok(transitions)
     }
     
+    
+    /// Process a sequence of transactions with automatic checkpointing at specified intervals
+    pub fn process_transactions_with_checkpoints<T, R>(
+        &mut self,
+        transactions: &[T],
+        rule_set: &R,
+        context: &ExecutionContext,
+        checkpoint_interval: usize,
+    ) -> Result<Vec<StateTransition<S>>, ProcessingError>
+    where
+        T: Transaction,
+        R: RuleSet<S, T>,
+    {
+        let mut transitions = Vec::with_capacity(transactions.len());
+        
+        for (index, transaction) in transactions.iter().enumerate() {
+            let transition = self.process_transaction(transaction, rule_set, context)?;
+            transitions.push(transition);
+            
+            // Create checkpoint at specified intervals
+            if checkpoint_interval > 0 && (index + 1) % checkpoint_interval == 0 {
+                let checkpoint = self.create_checkpoint(transaction.timestamp());
+                
+                // Record checkpoint info in execution trace
+                self.execution_trace.checkpoints.push(crate::types::CheckpointInfo {
+                    transaction_index: checkpoint.transaction_index,
+                    hash: checkpoint.hash,
+                    timestamp: checkpoint.timestamp,
+                });
+            }
+        }
+        
+        Ok(transitions)
+    }
     /// Get the current state
     pub fn current_state(&self) -> &S {
         self.state_manager.current_state()

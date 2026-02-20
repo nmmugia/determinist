@@ -619,3 +619,258 @@ mod unit_tests {
         assert_eq!(result.final_state.transaction_count, 2);
     }
 }
+
+
+// **Feature: deterministic-transaction-replay-engine, Property 33: Incremental Checkpointing**
+// **Validates: Requirements 9.1**
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+    
+    #[test]
+    fn property_incremental_checkpointing(
+        initial_state in arbitrary_test_state(),
+        transactions in prop::collection::vec(arbitrary_test_transaction(), 10..100),
+        checkpoint_interval in 5usize..20,
+        seed in any::<u64>(),
+    ) {
+        let time = Utc::now();
+        let context = ExecutionContext::new(time, seed);
+        let rule_set = TestRuleSet {
+            version: Version::new(1, 0, 0),
+        };
+        
+        // Create engine with checkpointing enabled
+        let engine = ReplayEngine::with_checkpointing(
+            initial_state.clone(),
+            rule_set.clone(),
+            context.clone(),
+            checkpoint_interval,
+        );
+        
+        // Replay with checkpointing
+        let result = engine.replay(&transactions).unwrap();
+        
+        // Verify checkpoints were created at the expected intervals
+        let expected_checkpoint_count = transactions.len() / checkpoint_interval;
+        if expected_checkpoint_count > 0 {
+            prop_assert!(result.execution_trace.checkpoints.len() >= expected_checkpoint_count - 1);
+        }
+        
+        // Verify final state is correct
+        prop_assert!(result.final_state.validate().is_ok());
+        prop_assert_eq!(result.execution_trace.transactions_processed, transactions.len());
+    }
+}
+
+// **Feature: deterministic-transaction-replay-engine, Property 34: Replay Resumption**
+// **Validates: Requirements 9.4**
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+    
+    #[test]
+    fn property_replay_resumption(
+        initial_state in arbitrary_test_state(),
+        transactions in prop::collection::vec(arbitrary_test_transaction(), 20..50),
+        checkpoint_interval in 5usize..10,
+        seed in any::<u64>(),
+    ) {
+        let time = Utc::now();
+        let context = ExecutionContext::new(time, seed);
+        let rule_set = TestRuleSet {
+            version: Version::new(1, 0, 0),
+        };
+        
+        // First, do a complete replay without interruption
+        let engine_complete = ReplayEngine::new(
+            initial_state.clone(),
+            rule_set.clone(),
+            context.clone(),
+        );
+        let complete_result = engine_complete.replay(&transactions).unwrap();
+        
+        // Now, simulate an interrupted replay by splitting transactions
+        let split_point = transactions.len() / 2;
+        let (first_half, second_half) = transactions.split_at(split_point);
+        
+        // Process first half with checkpointing
+        let engine_partial = ReplayEngine::with_checkpointing(
+            initial_state.clone(),
+            rule_set.clone(),
+            context.clone(),
+            checkpoint_interval,
+        );
+        let partial_result = engine_partial.replay(first_half).unwrap();
+        
+        // Get the last checkpoint
+        prop_assume!(!partial_result.execution_trace.checkpoints.is_empty());
+        let last_checkpoint_info = partial_result.execution_trace.checkpoints.last().unwrap();
+        
+        // Create a checkpoint from the partial result's final state
+        let checkpoint = dtre::Checkpoint {
+            state: partial_result.final_state.clone(),
+            hash: last_checkpoint_info.hash,
+            transaction_index: last_checkpoint_info.transaction_index,
+            timestamp: last_checkpoint_info.timestamp,
+        };
+        
+        // Resume from checkpoint with remaining transactions
+        let engine_resumed = ReplayEngine::new(
+            initial_state.clone(),
+            rule_set.clone(),
+            context.clone(),
+        );
+        let resumed_result = engine_resumed.replay_from_checkpoint(&checkpoint, second_half).unwrap();
+        
+        // The final state from resumed replay should match the complete replay
+        prop_assert_eq!(resumed_result.final_hash, complete_result.final_hash);
+        prop_assert_eq!(resumed_result.final_state.balance, complete_result.final_state.balance);
+    }
+}
+
+// **Feature: deterministic-transaction-replay-engine, Property 25: Rule Migration Impact Analysis**
+// **Validates: Requirements 7.3**
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+    
+    #[test]
+    fn property_rule_migration_impact_analysis(
+        initial_state in arbitrary_test_state(),
+        transactions in prop::collection::vec(arbitrary_test_transaction(), 1..30),
+        seed in any::<u64>(),
+        multiplier in 1i64..5,
+    ) {
+        let time = Utc::now();
+        let context = ExecutionContext::new(time, seed);
+        
+        // Create baseline rule set
+        let baseline_rules = TestRuleSet {
+            version: Version::new(1, 0, 0),
+        };
+        
+        // Create a modified rule set that applies a multiplier to amounts
+        #[derive(Clone, Debug)]
+        struct ModifiedRuleSet {
+            version: Version,
+            multiplier: i64,
+        }
+        
+        impl RuleSet<TestState, TestTransaction> for ModifiedRuleSet {
+            fn version(&self) -> Version {
+                self.version.clone()
+            }
+            
+            fn apply(
+                &self,
+                state: &TestState,
+                transaction: &TestTransaction,
+                _context: &ExecutionContext,
+            ) -> Result<TestState, ProcessingError> {
+                Ok(TestState {
+                    balance: state.balance + (transaction.amount * self.multiplier),
+                    transaction_count: state.transaction_count + 1,
+                })
+            }
+        }
+        
+        let modified_rules = ModifiedRuleSet {
+            version: Version::new(2, 0, 0),
+            multiplier,
+        };
+        
+        // Create engine with baseline rules
+        let engine = ReplayEngine::new(
+            initial_state.clone(),
+            baseline_rules.clone(),
+            context.clone(),
+        );
+        
+        // Perform impact analysis
+        let analysis = engine.analyze_migration_impact(&transactions, &modified_rules);
+        prop_assert!(analysis.is_ok(), "Impact analysis failed: {:?}", analysis.err());
+        let analysis = analysis.unwrap();
+        
+        // Verify analysis structure
+        prop_assert_eq!(&analysis.baseline_version, &Version::new(1, 0, 0));
+        prop_assert_eq!(&analysis.comparison_version, &Version::new(2, 0, 0));
+        
+        // Verify both replays succeeded
+        prop_assert_eq!(
+            analysis.baseline_result.execution_trace.transactions_processed,
+            transactions.len()
+        );
+        prop_assert_eq!(
+            analysis.comparison_result.execution_trace.transactions_processed,
+            transactions.len()
+        );
+        
+        // If multiplier is 1, results should be identical (safe migration)
+        if multiplier == 1 {
+            prop_assert!(analysis.is_safe_migration(),
+                "Migration with multiplier=1 should be safe");
+            prop_assert_eq!(analysis.difference_count(), 0,
+                "Migration with multiplier=1 should have no differences");
+            prop_assert!(analysis.identical_final_state,
+                "Final states should be identical with multiplier=1");
+            prop_assert!(analysis.identical_final_hash,
+                "Final hashes should be identical with multiplier=1");
+        } else {
+            // If multiplier is not 1, results should differ (unsafe migration)
+            prop_assert!(!analysis.is_safe_migration(),
+                "Migration with multiplier={} should not be safe", multiplier);
+            
+            // If there are transactions, there should be differences
+            if !transactions.is_empty() {
+                prop_assert!(analysis.difference_count() > 0,
+                    "Migration with multiplier={} should have differences", multiplier);
+                prop_assert!(!analysis.identical_final_state,
+                    "Final states should differ with multiplier={}", multiplier);
+                prop_assert!(!analysis.identical_final_hash,
+                    "Final hashes should differ with multiplier={}", multiplier);
+            }
+        }
+        
+        // Verify that the baseline result matches expected calculation
+        let expected_baseline_balance = initial_state.balance + 
+            transactions.iter().map(|t| t.amount).sum::<i64>();
+        prop_assert_eq!(
+            analysis.baseline_result.final_state.balance,
+            expected_baseline_balance,
+            "Baseline balance doesn't match expected"
+        );
+        
+        // Verify that the comparison result matches expected calculation with multiplier
+        let expected_comparison_balance = initial_state.balance + 
+            transactions.iter().map(|t| t.amount * multiplier).sum::<i64>();
+        prop_assert_eq!(
+            analysis.comparison_result.final_state.balance,
+            expected_comparison_balance,
+            "Comparison balance doesn't match expected"
+        );
+        
+        // Verify that differences are correctly identified
+        if multiplier != 1 && !transactions.is_empty() {
+            // Each transaction should create a difference
+            for (index, diff) in analysis.differences.iter().enumerate() {
+                prop_assert_eq!(diff.transaction_index, index,
+                    "Difference index should match transaction index");
+                prop_assert_eq!(&diff.transaction_id, transactions[index].id(),
+                    "Difference transaction ID should match");
+                prop_assert_ne!(diff.baseline_hash, diff.comparison_hash,
+                    "Baseline and comparison hashes should differ");
+            }
+        }
+        
+        // Verify summary contains expected information
+        let summary = analysis.summary();
+        prop_assert!(summary.contains("1.0.0"), "Summary should contain baseline version");
+        prop_assert!(summary.contains("2.0.0"), "Summary should contain comparison version");
+        
+        if multiplier == 1 {
+            prop_assert!(summary.contains("Safe migration"),
+                "Summary should indicate safe migration");
+        } else if !transactions.is_empty() {
+            prop_assert!(summary.contains("Migration impact"),
+                "Summary should indicate migration impact");
+        }
+    }
+}

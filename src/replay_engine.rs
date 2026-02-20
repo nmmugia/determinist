@@ -21,6 +21,7 @@ where
     initial_state: S,
     rule_set: R,
     context: ExecutionContext,
+    checkpoint_interval: Option<usize>,
     _phantom_t: PhantomData<T>,
 }
 
@@ -36,6 +37,23 @@ where
             initial_state,
             rule_set,
             context,
+            checkpoint_interval: None,
+            _phantom_t: PhantomData,
+        }
+    }
+    
+    /// Create a new replay engine with checkpointing enabled
+    pub fn with_checkpointing(
+        initial_state: S,
+        rule_set: R,
+        context: ExecutionContext,
+        checkpoint_interval: usize,
+    ) -> Self {
+        Self {
+            initial_state,
+            rule_set,
+            context,
+            checkpoint_interval: Some(checkpoint_interval),
             _phantom_t: PhantomData,
         }
     }
@@ -52,8 +70,17 @@ where
         // Create a transaction processor with the initial state
         let mut processor = TransactionProcessor::new(self.initial_state.clone())?;
         
-        // Process all transactions in order
-        processor.process_transactions(transactions, &self.rule_set, &self.context)?;
+        // Process all transactions in order with optional checkpointing
+        if let Some(interval) = self.checkpoint_interval {
+            processor.process_transactions_with_checkpoints(
+                transactions,
+                &self.rule_set,
+                &self.context,
+                interval,
+            )?;
+        } else {
+            processor.process_transactions(transactions, &self.rule_set, &self.context)?;
+        }
         
         // Calculate performance metrics
         let duration = start_time.elapsed();
@@ -65,6 +92,63 @@ where
         };
         let average_transaction_time_ms = if !transactions.is_empty() {
             duration_ms as f64 / transactions.len() as f64
+        } else {
+            0.0
+        };
+        
+        let performance_metrics = PerformanceMetrics {
+            total_duration_ms: duration_ms,
+            transactions_per_second,
+            average_transaction_time_ms,
+        };
+        
+        // Get the final hash before consuming the processor
+        let final_hash = processor.current_hash();
+        
+        // Get the final state and execution trace
+        let (final_state, execution_trace) = processor.into_result();
+        
+        Ok(ReplayResult {
+            final_state,
+            final_hash,
+            execution_trace,
+            performance_metrics,
+        })
+    }
+    
+    /// Resume replay from a checkpoint
+    pub fn replay_from_checkpoint(
+        &self,
+        checkpoint: &crate::state_manager::Checkpoint<S>,
+        remaining_transactions: &[T],
+    ) -> Result<ReplayResult<S>, ProcessingError> {
+        let start_time = Instant::now();
+        
+        // Create a transaction processor from the checkpoint state
+        let mut processor = TransactionProcessor::from_checkpoint(checkpoint)?;
+        
+        // Process remaining transactions with optional checkpointing
+        if let Some(interval) = self.checkpoint_interval {
+            processor.process_transactions_with_checkpoints(
+                remaining_transactions,
+                &self.rule_set,
+                &self.context,
+                interval,
+            )?;
+        } else {
+            processor.process_transactions(remaining_transactions, &self.rule_set, &self.context)?;
+        }
+        
+        // Calculate performance metrics
+        let duration = start_time.elapsed();
+        let duration_ms = duration.as_millis() as u64;
+        let transactions_per_second = if duration_ms > 0 {
+            (remaining_transactions.len() as f64) / (duration_ms as f64 / 1000.0)
+        } else {
+            0.0
+        };
+        let average_transaction_time_ms = if !remaining_transactions.is_empty() {
+            duration_ms as f64 / remaining_transactions.len() as f64
         } else {
             0.0
         };
@@ -201,6 +285,144 @@ where
     pub fn context(&self) -> &ExecutionContext {
         &self.context
     }
+    
+    /// Replay transactions with a different rule set for migration impact analysis
+    /// 
+    /// This method replays the same transaction sequence with a different rule version
+    /// and compares the results to assess the impact of rule changes.
+    pub fn replay_with_different_rules<R2>(
+        &self,
+        transactions: &[T],
+        new_rule_set: &R2,
+    ) -> Result<ReplayResult<S>, ProcessingError>
+    where
+        R2: RuleSet<S, T>,
+    {
+        let start_time = std::time::Instant::now();
+        
+        // Create a transaction processor with the initial state
+        let mut processor = TransactionProcessor::new(self.initial_state.clone())?;
+        
+        // Process all transactions with the new rule set
+        if let Some(interval) = self.checkpoint_interval {
+            processor.process_transactions_with_checkpoints(
+                transactions,
+                new_rule_set,
+                &self.context,
+                interval,
+            )?;
+        } else {
+            processor.process_transactions(transactions, new_rule_set, &self.context)?;
+        }
+        
+        // Calculate performance metrics
+        let duration = start_time.elapsed();
+        let duration_ms = duration.as_millis() as u64;
+        let transactions_per_second = if duration_ms > 0 {
+            (transactions.len() as f64) / (duration_ms as f64 / 1000.0)
+        } else {
+            0.0
+        };
+        let average_transaction_time_ms = if !transactions.is_empty() {
+            duration_ms as f64 / transactions.len() as f64
+        } else {
+            0.0
+        };
+        
+        let performance_metrics = crate::types::PerformanceMetrics {
+            total_duration_ms: duration_ms,
+            transactions_per_second,
+            average_transaction_time_ms,
+        };
+        
+        // Get the final hash before consuming the processor
+        let final_hash = processor.current_hash();
+        
+        // Get the final state and execution trace
+        let (final_state, execution_trace) = processor.into_result();
+        
+        Ok(ReplayResult {
+            final_state,
+            final_hash,
+            execution_trace,
+            performance_metrics,
+        })
+    }
+    
+    /// Perform impact analysis by comparing replay results with different rule versions
+    /// 
+    /// This method replays the transaction sequence with both the current rule set
+    /// and a new rule set, then compares the results to identify differences.
+    pub fn analyze_migration_impact<R2>(
+        &self,
+        transactions: &[T],
+        new_rule_set: &R2,
+    ) -> Result<crate::types::ImpactAnalysis<S>, ProcessingError>
+    where
+        R2: RuleSet<S, T>,
+        S: PartialEq,
+    {
+        // Replay with baseline (current) rule set
+        let baseline_result = self.replay(transactions)?;
+        
+        // Replay with new rule set
+        let comparison_result = self.replay_with_different_rules(transactions, new_rule_set)?;
+        
+        // Compare the results
+        let mut differences = Vec::new();
+        
+        // Compare state transitions at each step
+        let baseline_transitions = &baseline_result.execution_trace.state_transitions;
+        let comparison_transitions = &comparison_result.execution_trace.state_transitions;
+        
+        for (index, (baseline_trans, comparison_trans)) in 
+            baseline_transitions.iter().zip(comparison_transitions.iter()).enumerate() 
+        {
+            if baseline_trans.to_hash != comparison_trans.to_hash {
+                differences.push(crate::types::StateDifference {
+                    transaction_id: baseline_trans.transaction_id.clone(),
+                    transaction_index: index,
+                    baseline_hash: baseline_trans.to_hash,
+                    comparison_hash: comparison_trans.to_hash,
+                    description: format!(
+                        "State diverged after transaction {} (index {})",
+                        baseline_trans.transaction_id, index
+                    ),
+                });
+            }
+        }
+        
+        // Check if final states are identical
+        let identical_final_state = baseline_result.final_state == comparison_result.final_state;
+        let identical_final_hash = baseline_result.final_hash == comparison_result.final_hash;
+        
+        Ok(crate::types::ImpactAnalysis {
+            baseline_version: self.rule_set.version(),
+            comparison_version: new_rule_set.version(),
+            baseline_result,
+            comparison_result,
+            differences,
+            identical_final_state,
+            identical_final_hash,
+        })
+    }
+    
+    /// Verify that a rule migration is safe by checking if it produces identical results
+    /// 
+    /// This is a convenience method that performs impact analysis and returns
+    /// whether the migration is safe (produces identical results).
+    pub fn verify_migration_safety<R2>(
+        &self,
+        transactions: &[T],
+        new_rule_set: &R2,
+    ) -> Result<bool, ProcessingError>
+    where
+        R2: RuleSet<S, T>,
+        S: PartialEq,
+    {
+        let analysis = self.analyze_migration_impact(transactions, new_rule_set)?;
+        Ok(analysis.is_safe_migration())
+    }
 }
 
 /// Builder for constructing replay engines with a fluent API
@@ -213,6 +435,7 @@ where
     initial_state: Option<S>,
     rule_set: Option<R>,
     context: Option<ExecutionContext>,
+    checkpoint_interval: Option<usize>,
     _phantom_t: PhantomData<T>,
 }
 
@@ -228,6 +451,7 @@ where
             initial_state: None,
             rule_set: None,
             context: None,
+            checkpoint_interval: None,
             _phantom_t: PhantomData,
         }
     }
@@ -256,13 +480,23 @@ where
         self
     }
     
+    /// Enable checkpointing with the specified interval
+    pub fn with_checkpoint_interval(mut self, interval: usize) -> Self {
+        self.checkpoint_interval = Some(interval);
+        self
+    }
+    
     /// Build the replay engine
     pub fn build(self) -> Result<ReplayEngine<S, T, R>, String> {
         let initial_state = self.initial_state.ok_or("Initial state is required")?;
         let rule_set = self.rule_set.ok_or("Rule set is required")?;
         let context = self.context.ok_or("Execution context is required")?;
         
-        Ok(ReplayEngine::new(initial_state, rule_set, context))
+        if let Some(interval) = self.checkpoint_interval {
+            Ok(ReplayEngine::with_checkpointing(initial_state, rule_set, context, interval))
+        } else {
+            Ok(ReplayEngine::new(initial_state, rule_set, context))
+        }
     }
 }
 
@@ -560,5 +794,241 @@ mod tests {
         
         // Verify final state reflects ordered processing
         assert_eq!(result.final_state.balance, 60);
+    }
+    
+    #[test]
+    fn test_replay_with_different_rules() {
+        let state = TestState { balance: 100 };
+        let rule_set_v1 = TestRuleSet {
+            version: Version::new(1, 0, 0),
+        };
+        let context = ExecutionContext::new(Utc::now(), 42);
+        
+        let engine = ReplayEngine::new(state, rule_set_v1, context);
+        
+        let transactions = vec![
+            TestTransaction {
+                id: "tx1".to_string(),
+                amount: 50,
+                timestamp: Utc::now(),
+            },
+        ];
+        
+        // Create a different rule set that doubles the amount
+        #[derive(Clone, Debug)]
+        struct DoubleRuleSet {
+            version: Version,
+        }
+        
+        impl RuleSet<TestState, TestTransaction> for DoubleRuleSet {
+            fn version(&self) -> Version {
+                self.version.clone()
+            }
+            
+            fn apply(
+                &self,
+                state: &TestState,
+                transaction: &TestTransaction,
+                _context: &ExecutionContext,
+            ) -> Result<TestState, ProcessingError> {
+                Ok(TestState {
+                    balance: state.balance + (transaction.amount * 2),
+                })
+            }
+        }
+        
+        let rule_set_v2 = DoubleRuleSet {
+            version: Version::new(2, 0, 0),
+        };
+        
+        let result = engine.replay_with_different_rules(&transactions, &rule_set_v2);
+        assert!(result.is_ok());
+        
+        let result = result.unwrap();
+        assert_eq!(result.final_state.balance, 200); // 100 + (50 * 2)
+        assert_eq!(result.execution_trace.transactions_processed, 1);
+        assert_eq!(result.execution_trace.rule_applications[0].rule_version, Version::new(2, 0, 0));
+    }
+    
+    #[test]
+    fn test_analyze_migration_impact_identical() {
+        let state = TestState { balance: 100 };
+        let rule_set_v1 = TestRuleSet {
+            version: Version::new(1, 0, 0),
+        };
+        let context = ExecutionContext::new(Utc::now(), 42);
+        
+        let engine = ReplayEngine::new(state, rule_set_v1, context);
+        
+        let transactions = vec![
+            TestTransaction {
+                id: "tx1".to_string(),
+                amount: 50,
+                timestamp: Utc::now(),
+            },
+        ];
+        
+        // Use the same rule set for comparison
+        let rule_set_v2 = TestRuleSet {
+            version: Version::new(1, 1, 0),
+        };
+        
+        let analysis = engine.analyze_migration_impact(&transactions, &rule_set_v2);
+        assert!(analysis.is_ok());
+        
+        let analysis = analysis.unwrap();
+        assert!(analysis.is_safe_migration());
+        assert_eq!(analysis.difference_count(), 0);
+        assert!(analysis.identical_final_state);
+        assert!(analysis.identical_final_hash);
+    }
+    
+    #[test]
+    fn test_analyze_migration_impact_different() {
+        let state = TestState { balance: 100 };
+        let rule_set_v1 = TestRuleSet {
+            version: Version::new(1, 0, 0),
+        };
+        let context = ExecutionContext::new(Utc::now(), 42);
+        
+        let engine = ReplayEngine::new(state, rule_set_v1, context);
+        
+        let transactions = vec![
+            TestTransaction {
+                id: "tx1".to_string(),
+                amount: 50,
+                timestamp: Utc::now(),
+            },
+        ];
+        
+        // Create a different rule set that doubles the amount
+        #[derive(Clone, Debug)]
+        struct DoubleRuleSet {
+            version: Version,
+        }
+        
+        impl RuleSet<TestState, TestTransaction> for DoubleRuleSet {
+            fn version(&self) -> Version {
+                self.version.clone()
+            }
+            
+            fn apply(
+                &self,
+                state: &TestState,
+                transaction: &TestTransaction,
+                _context: &ExecutionContext,
+            ) -> Result<TestState, ProcessingError> {
+                Ok(TestState {
+                    balance: state.balance + (transaction.amount * 2),
+                })
+            }
+        }
+        
+        let rule_set_v2 = DoubleRuleSet {
+            version: Version::new(2, 0, 0),
+        };
+        
+        let analysis = engine.analyze_migration_impact(&transactions, &rule_set_v2);
+        assert!(analysis.is_ok());
+        
+        let analysis = analysis.unwrap();
+        assert!(!analysis.is_safe_migration());
+        assert_eq!(analysis.difference_count(), 1);
+        assert!(!analysis.identical_final_state);
+        assert!(!analysis.identical_final_hash);
+        
+        // Check the difference details
+        let diff = &analysis.differences[0];
+        assert_eq!(diff.transaction_id, "tx1");
+        assert_eq!(diff.transaction_index, 0);
+    }
+    
+    #[test]
+    fn test_verify_migration_safety() {
+        let state = TestState { balance: 100 };
+        let rule_set_v1 = TestRuleSet {
+            version: Version::new(1, 0, 0),
+        };
+        let context = ExecutionContext::new(Utc::now(), 42);
+        
+        let engine = ReplayEngine::new(state, rule_set_v1, context);
+        
+        let transactions = vec![
+            TestTransaction {
+                id: "tx1".to_string(),
+                amount: 50,
+                timestamp: Utc::now(),
+            },
+        ];
+        
+        // Test with identical rule set
+        let rule_set_v2 = TestRuleSet {
+            version: Version::new(1, 1, 0),
+        };
+        
+        let is_safe = engine.verify_migration_safety(&transactions, &rule_set_v2);
+        assert!(is_safe.is_ok());
+        assert!(is_safe.unwrap());
+        
+        // Test with different rule set
+        #[derive(Clone, Debug)]
+        struct DoubleRuleSet {
+            version: Version,
+        }
+        
+        impl RuleSet<TestState, TestTransaction> for DoubleRuleSet {
+            fn version(&self) -> Version {
+                self.version.clone()
+            }
+            
+            fn apply(
+                &self,
+                state: &TestState,
+                transaction: &TestTransaction,
+                _context: &ExecutionContext,
+            ) -> Result<TestState, ProcessingError> {
+                Ok(TestState {
+                    balance: state.balance + (transaction.amount * 2),
+                })
+            }
+        }
+        
+        let rule_set_v3 = DoubleRuleSet {
+            version: Version::new(2, 0, 0),
+        };
+        
+        let is_safe = engine.verify_migration_safety(&transactions, &rule_set_v3);
+        assert!(is_safe.is_ok());
+        assert!(!is_safe.unwrap());
+    }
+    
+    #[test]
+    fn test_impact_analysis_summary() {
+        let state = TestState { balance: 100 };
+        let rule_set_v1 = TestRuleSet {
+            version: Version::new(1, 0, 0),
+        };
+        let context = ExecutionContext::new(Utc::now(), 42);
+        
+        let engine = ReplayEngine::new(state, rule_set_v1, context);
+        
+        let transactions = vec![
+            TestTransaction {
+                id: "tx1".to_string(),
+                amount: 50,
+                timestamp: Utc::now(),
+            },
+        ];
+        
+        // Test with identical rule set
+        let rule_set_v2 = TestRuleSet {
+            version: Version::new(1, 1, 0),
+        };
+        
+        let analysis = engine.analyze_migration_impact(&transactions, &rule_set_v2).unwrap();
+        let summary = analysis.summary();
+        assert!(summary.contains("Safe migration"));
+        assert!(summary.contains("1.0.0"));
+        assert!(summary.contains("1.1.0"));
     }
 }

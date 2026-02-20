@@ -54,6 +54,15 @@ pub struct ExecutionTrace {
     pub transactions_processed: usize,
     pub state_transitions: Vec<StateTransitionInfo>,
     pub rule_applications: Vec<RuleApplication>,
+    pub checkpoints: Vec<CheckpointInfo>,
+}
+
+/// Information about a checkpoint
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckpointInfo {
+    pub transaction_index: usize,
+    pub hash: StateHash,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
 /// Information about a state transition
@@ -88,4 +97,56 @@ pub struct PerformanceMetrics {
     pub total_duration_ms: u64,
     pub transactions_per_second: f64,
     pub average_transaction_time_ms: f64,
+}
+
+/// Impact analysis comparing two replay results from different rule versions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImpactAnalysis<S> {
+    pub baseline_version: Version,
+    pub comparison_version: Version,
+    pub baseline_result: ReplayResult<S>,
+    pub comparison_result: ReplayResult<S>,
+    pub differences: Vec<StateDifference>,
+    pub identical_final_state: bool,
+    pub identical_final_hash: bool,
+}
+
+/// Difference between states at a specific transaction
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateDifference {
+    pub transaction_id: String,
+    pub transaction_index: usize,
+    pub baseline_hash: StateHash,
+    pub comparison_hash: StateHash,
+    pub description: String,
+}
+
+impl<S> ImpactAnalysis<S> {
+    /// Check if the rule migration is safe (produces identical results)
+    pub fn is_safe_migration(&self) -> bool {
+        self.identical_final_state && self.identical_final_hash && self.differences.is_empty()
+    }
+    
+    /// Get the number of differences found
+    pub fn difference_count(&self) -> usize {
+        self.differences.len()
+    }
+    
+    /// Get a summary of the impact analysis
+    pub fn summary(&self) -> String {
+        if self.is_safe_migration() {
+            format!(
+                "Safe migration: {} -> {} produces identical results",
+                self.baseline_version, self.comparison_version
+            )
+        } else {
+            format!(
+                "Migration impact: {} -> {} has {} differences, final states {}",
+                self.baseline_version,
+                self.comparison_version,
+                self.difference_count(),
+                if self.identical_final_state { "match" } else { "differ" }
+            )
+        }
+    }
 }
