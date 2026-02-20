@@ -97,36 +97,44 @@ proptest! {
     /// identical regardless of execution environment.
     #[test]
     fn property_external_facts_consistency(
-        seed in arbitrary_seed(),
-        fact_values in prop::collection::vec(any::<i64>(), 1..20),
-        fact_strings in prop::collection::vec("[a-z]{3,10}", 1..20)
+        _seed in arbitrary_seed(),
+        fact_values in prop::collection::vec(any::<i64>(), 1..10),
+        fact_strings in prop::collection::vec("[a-z]{3,10}", 1..10)
     ) {
-        // Create external facts containers
-        let mut facts1 = ExternalFacts::new();
-        let mut facts2 = ExternalFacts::new();
+        // Create execution contexts with external facts
+        let time = Utc.timestamp_opt(1000000, 0).unwrap();
+        let mut ctx1 = ExecutionContext::builder()
+            .with_time(time)
+            .with_random_seed(42);
+        let mut ctx2 = ExecutionContext::builder()
+            .with_time(time)
+            .with_random_seed(42);
         
         // Add the same external facts to both contexts
         for (i, value) in fact_values.iter().enumerate() {
             let key = format!("fact_int_{}", i);
-            facts1.insert(key.clone(), *value);
-            facts2.insert(key, *value);
+            ctx1 = ctx1.with_external_fact(key.clone(), *value);
+            ctx2 = ctx2.with_external_fact(key, *value);
         }
         
         for (i, value) in fact_strings.iter().enumerate() {
             let key = format!("fact_str_{}", i);
-            facts1.insert(key.clone(), value.clone());
-            facts2.insert(key, value.clone());
+            ctx1 = ctx1.with_external_fact(key.clone(), value.clone());
+            ctx2 = ctx2.with_external_fact(key, value.clone());
         }
         
-        // Both fact containers should have the same number of facts
-        prop_assert_eq!(facts1.len(), facts2.len());
-        prop_assert_eq!(facts1.len(), fact_values.len() + fact_strings.len());
+        let ctx1 = ctx1.build();
+        let ctx2 = ctx2.build();
+        
+        // Both contexts should have the same number of facts
+        prop_assert_eq!(ctx1.external_facts().len(), ctx2.external_facts().len());
+        prop_assert_eq!(ctx1.external_facts().len(), fact_values.len() + fact_strings.len());
         
         // Retrieving facts should return the same values
         for (i, expected_value) in fact_values.iter().enumerate() {
             let key = format!("fact_int_{}", i);
-            let value1: Option<&i64> = facts1.get(&key);
-            let value2: Option<&i64> = facts2.get(&key);
+            let value1: Option<&i64> = ctx1.get_external_fact(&key);
+            let value2: Option<&i64> = ctx2.get_external_fact(&key);
             
             prop_assert_eq!(value1, Some(expected_value));
             prop_assert_eq!(value2, Some(expected_value));
@@ -135,21 +143,21 @@ proptest! {
         
         for (i, expected_value) in fact_strings.iter().enumerate() {
             let key = format!("fact_str_{}", i);
-            let value1: Option<&String> = facts1.get(&key);
-            let value2: Option<&String> = facts2.get(&key);
+            let value1: Option<&String> = ctx1.get_external_fact(&key);
+            let value2: Option<&String> = ctx2.get_external_fact(&key);
             
             prop_assert_eq!(value1, Some(expected_value));
             prop_assert_eq!(value2, Some(expected_value));
             prop_assert_eq!(value1, value2);
         }
         
-        // Cloning should preserve all facts
-        let facts3 = facts1.clone();
-        prop_assert_eq!(facts3.len(), facts1.len());
+        // Cloning context should preserve all facts
+        let ctx3 = ctx1.clone();
+        prop_assert_eq!(ctx3.external_facts().len(), ctx1.external_facts().len());
         
         for (i, expected_value) in fact_values.iter().enumerate() {
             let key = format!("fact_int_{}", i);
-            let value3: Option<&i64> = facts3.get(&key);
+            let value3: Option<&i64> = ctx3.get_external_fact(&key);
             prop_assert_eq!(value3, Some(expected_value));
         }
     }

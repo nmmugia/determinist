@@ -6,6 +6,7 @@ use rand_chacha::ChaCha8Rng;
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::any::Any;
+use crate::error::ProcessingError;
 
 /// Deterministic time provider with frozen time values
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,7 +89,6 @@ impl Clone for SeededRandom {
 }
 
 /// Container for immutable external data
-#[derive(Clone)]
 pub struct ExternalFacts {
     facts: HashMap<String, FactWrapper>,
 }
@@ -103,6 +103,18 @@ impl Clone for FactWrapper {
         Self {
             value: self.value.clone_box(),
             type_id: self.type_id,
+        }
+    }
+}
+
+impl Clone for ExternalFacts {
+    fn clone(&self) -> Self {
+        let mut new_facts = HashMap::new();
+        for (key, wrapper) in &self.facts {
+            new_facts.insert(key.clone(), wrapper.clone());
+        }
+        Self {
+            facts: new_facts,
         }
     }
 }
@@ -180,12 +192,6 @@ where
 {
     fn clone_box(&self) -> Box<dyn ExternalFact> {
         Box::new(self.clone())
-    }
-}
-
-impl Clone for Box<dyn ExternalFact> {
-    fn clone(&self) -> Self {
-        self.clone_box()
     }
 }
 
@@ -291,6 +297,106 @@ impl ExecutionContextBuilder {
 }
 
 impl Default for ExecutionContextBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Types of operations that can be checked for determinism
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Operation {
+    /// Access to system time
+    SystemTime,
+    /// Random number generation without a seed
+    RandomWithoutSeed,
+    /// Network access
+    NetworkAccess,
+    /// File system access (reading)
+    FileSystemRead,
+    /// File system access (writing)
+    FileSystemWrite,
+    /// Environment variable access
+    EnvironmentVariable,
+    /// Thread spawning
+    ThreadSpawn,
+    /// Process spawning
+    ProcessSpawn,
+}
+
+/// Guard to detect and prevent non-deterministic operations
+#[derive(Debug, Clone)]
+pub struct NonDeterminismGuard {
+    strict_mode: bool,
+}
+
+impl NonDeterminismGuard {
+    /// Create a new non-determinism guard in strict mode
+    pub fn new() -> Self {
+        Self {
+            strict_mode: true,
+        }
+    }
+    
+    /// Create a guard with custom strictness settings
+    pub fn with_strict_mode(strict: bool) -> Self {
+        Self {
+            strict_mode: strict,
+        }
+    }
+    
+    /// Check if an operation is allowed
+    pub fn check_operation(&self, op: &Operation) -> Result<(), ProcessingError> {
+        if !self.strict_mode {
+            return Ok(());
+        }
+        
+        match op {
+            Operation::SystemTime => Err(ProcessingError::NonDeterministicOperation {
+                operation: "system_time".to_string(),
+                location: "time access".to_string(),
+            }),
+            Operation::RandomWithoutSeed => Err(ProcessingError::NonDeterministicOperation {
+                operation: "unseeded_random".to_string(),
+                location: "random generation".to_string(),
+            }),
+            Operation::NetworkAccess => Err(ProcessingError::NonDeterministicOperation {
+                operation: "network_access".to_string(),
+                location: "external dependency".to_string(),
+            }),
+            Operation::FileSystemRead => Err(ProcessingError::NonDeterministicOperation {
+                operation: "file_system_read".to_string(),
+                location: "file system access".to_string(),
+            }),
+            Operation::FileSystemWrite => Err(ProcessingError::NonDeterministicOperation {
+                operation: "file_system_write".to_string(),
+                location: "file system access".to_string(),
+            }),
+            Operation::EnvironmentVariable => Err(ProcessingError::NonDeterministicOperation {
+                operation: "environment_variable".to_string(),
+                location: "environment access".to_string(),
+            }),
+            Operation::ThreadSpawn => Err(ProcessingError::NonDeterministicOperation {
+                operation: "thread_spawn".to_string(),
+                location: "concurrency".to_string(),
+            }),
+            Operation::ProcessSpawn => Err(ProcessingError::NonDeterministicOperation {
+                operation: "process_spawn".to_string(),
+                location: "process management".to_string(),
+            }),
+        }
+    }
+    
+    /// Validate that an operation is deterministic, returning the operation if valid
+    pub fn validate<T, F>(&self, op: &Operation, f: F) -> Result<T, ProcessingError>
+    where
+        F: FnOnce() -> T,
+    {
+        self.check_operation(op)?;
+        Ok(f())
+    }
+}
+
+impl Default for NonDeterminismGuard {
     fn default() -> Self {
         Self::new()
     }
