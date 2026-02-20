@@ -254,8 +254,8 @@ proptest! {
             // But the transaction IDs in the trace should be in different order
             if transactions.len() >= 2 {
                 prop_assert_ne!(
-                    result.execution_trace.state_transitions[0].transaction_id,
-                    result2.execution_trace.state_transitions[0].transaction_id,
+                    &result.execution_trace.state_transitions[0].transaction_id,
+                    &result2.execution_trace.state_transitions[0].transaction_id,
                     "First transaction ID should differ when order is reversed"
                 );
             }
