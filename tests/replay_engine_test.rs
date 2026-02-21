@@ -701,16 +701,13 @@ proptest! {
         );
         let partial_result = engine_partial.replay(first_half).unwrap();
         
-        // Get the last checkpoint
-        prop_assume!(!partial_result.execution_trace.checkpoints.is_empty());
-        let last_checkpoint_info = partial_result.execution_trace.checkpoints.last().unwrap();
-        
         // Create a checkpoint from the partial result's final state
+        // Use the final state and final hash from the partial result
         let checkpoint = dtre::Checkpoint {
             state: partial_result.final_state.clone(),
-            hash: last_checkpoint_info.hash,
-            transaction_index: last_checkpoint_info.transaction_index,
-            timestamp: last_checkpoint_info.timestamp,
+            hash: partial_result.final_hash,  // Use the final hash, not checkpoint hash
+            transaction_index: first_half.len(),  // Use the actual number of transactions processed
+            timestamp: time,
         };
         
         // Resume from checkpoint with remaining transactions
