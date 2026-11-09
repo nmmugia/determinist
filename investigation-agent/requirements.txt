@@ -1,0 +1,16 @@
+fastapi[all]==0.109.0
+uvicorn[standard]==0.27.0
+langgraph==0.2.27
+langchain==0.3.0
+langchain-openai==0.2.0
+langchain-community==0.3.0
+psycopg[binary,pool]==3.1.18
+pgvector==0.2.5
+pydantic==2.6.0
+pydantic-settings==2.1.0
+opentelemetry-api==1.24.0
+opentelemetry-sdk==1.24.0
+opentelemetry-instrumentation-fastapi==0.45b0
+opentelemetry-exporter-otlp-proto-grpc==1.24.0
+httpx==0.26.0
+python-json-logger==2.0.7
