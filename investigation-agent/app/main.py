@@ -135,42 +135,43 @@ async def investigate(request: InvestigationRequest):
     """
     tracer = trace.get_tracer(__name__)
 
+    from app.agent.graph import run_investigation
+
     with tracer.start_as_current_span("investigate") as span:
         span.set_attribute("investigation.id", request.investigation_id)
         span.set_attribute("investigation.query", request.query)
 
-        # TODO: Implement actual LangGraph agent workflow
-        # For now, return a mock response
-        return InvestigationResponse(
-            status="success",
-            findings=Findings(
-                primary_issue="Not implemented",
-                confidence=0.0,
-                summary="Investigation agent workflow not yet implemented",
-            ),
-            evidence=[
-                Evidence(
-                    type="transaction_record",
-                    source="internal_db",
-                    data=request.transaction_data,
-                )
-            ],
-            recommendations=[
-                "Implement LangGraph agent workflow",
-                "Implement RAG retrieval pipeline",
-                "Connect to OpenAI API",
-            ],
-            agent_trace=AgentTrace(
-                steps=[
-                    AgentStep(
-                        node="mock",
-                        duration_ms=0,
-                        output="Mock response - implementation pending",
-                    )
-                ],
-                total_duration_ms=0,
-            ),
-        )
+        try:
+            # Run the LangGraph investigation workflow
+            result = await run_investigation(
+                investigation_id=request.investigation_id,
+                query=request.query,
+                transaction_data=request.transaction_data,
+                settlement_data=request.settlement_data,
+                audit_logs=request.audit_logs,
+                dtre_replay_result=request.dtre_replay_result,
+            )
+
+            return InvestigationResponse(
+                status=result["status"],
+                findings=Findings(**result["findings"]),
+                evidence=[Evidence(**e) for e in result["evidence"]],
+                recommendations=result["recommendations"],
+                agent_trace=AgentTrace(**result["agent_trace"]),
+            )
+        except Exception as e:
+            span.record_error(e)
+            return InvestigationResponse(
+                status="error",
+                findings=Findings(
+                    primary_issue="Investigation failed",
+                    confidence=0.0,
+                    summary=f"Error during investigation: {str(e)}",
+                ),
+                evidence=[],
+                recommendations=["Check logs for error details", "Retry investigation"],
+                agent_trace=AgentTrace(steps=[], total_duration_ms=0),
+            )
 
 
 @app.get("/")
