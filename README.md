@@ -1,412 +1,219 @@
-# Deterministic Transaction Replay Engine (DTRE)
+# AI-Powered Transaction Investigation Platform
 
-A Rust library for deterministic execution of financial transactions through pure functional programming principles. The DTRE ensures that replaying the same sequence of transactions with identical initial state and business rules produces byte-for-byte identical results across different machines, times, and environments.
+A fintech operations platform that uses AI agents to investigate transaction discrepancies between internal records and external payment networks. Built with a hybrid Go/Python/Rust architecture featuring LangGraph agent orchestration, RAG-powered investigation, and deterministic transaction replay verification.
 
-## Features
+## Overview
 
-- **Deterministic Execution**: Guaranteed identical results across all replay environments
-- **Pure Functional Design**: All business logic functions are pure with no side effects
-- **Cryptographic Verification**: Every state change is cryptographically hashed for integrity
-- **Rule Versioning**: Support for multiple concurrent rule set versions with migration analysis
-- **Parallel Execution**: Thread-safe parallel processing while maintaining determinism
-- **Comprehensive Testing**: Property-based testing with 100+ iterations per property
-- **Audit Trail**: Complete execution traces for compliance and debugging
+Operations teams at banks manually investigate thousands of transaction discrepancies—transactions missing from settlement reports, status mismatches, duplicate processing, and timing issues. This platform automates investigation using an AI agent that:
 
-## Installation
+- Queries transaction and settlement data from PostgreSQL
+- Searches historical incidents via RAG (pgvector similarity search)
+- Retrieves payment network documentation
+- Analyzes DTRE (Deterministic Transaction Replay Engine) audit trails
+- Synthesizes findings with GPT-4
+- Generates actionable recommendations
 
-Add this to your `Cargo.toml`:
+**Example Query:** "Why is transaction TXN-20261109-001 successful internally but missing from settlement report?"
 
-```toml
-[dependencies]
-dtre = "0.1.0"
-```
-
-## Quick Start
-
-```rust
-use dtre::{
-    ReplayEngineBuilder, ExecutionContext, State, Transaction, RuleSet,
-    ValidationError, ProcessingError, Version
-};
-use chrono::Utc;
-use serde::{Serialize, Deserialize};
-
-// Define your state
-#[derive(Clone, Serialize, Deserialize, Hash)]
-struct MyState {
-    balance: i64,
-}
-
-impl State for MyState {
-    fn validate(&self) -> Result<(), ValidationError> {
-        if self.balance < 0 {
-            return Err(ValidationError::InvalidState {
-                reason: "Balance cannot be negative".to_string(),
-            });
-        }
-        Ok(())
-    }
-}
-
-// Define your transactions
-#[derive(Clone, Serialize, Deserialize)]
-struct MyTransaction {
-    id: String,
-    amount: i64,
-    timestamp: chrono::DateTime<Utc>,
-}
-
-impl Transaction for MyTransaction {
-    fn id(&self) -> &str {
-        &self.id
-    }
-    
-    fn timestamp(&self) -> chrono::DateTime<Utc> {
-        self.timestamp
-    }
-    
-    fn validate(&self) -> Result<(), ValidationError> {
-        Ok(())
-    }
-}
-
-// Define your business rules
-struct MyRules;
-
-impl RuleSet<MyState, MyTransaction> for MyRules {
-    fn version(&self) -> Version {
-        Version::new(1, 0, 0)
-    }
-    
-    fn apply(
-        &self,
-        state: &MyState,
-        transaction: &MyTransaction,
-        _context: &ExecutionContext,
-    ) -> Result<MyState, ProcessingError> {
-        Ok(MyState {
-            balance: state.balance + transaction.amount,
-        })
-    }
-}
-
-// Create and run the replay engine
-fn main() {
-    let initial_state = MyState { balance: 0 };
-    let transactions = vec![/* your transactions */];
-    let context = ExecutionContext::new(Utc::now(), 42);
-    
-    let engine = ReplayEngineBuilder::new()
-        .with_initial_state(initial_state)
-        .with_rule_set(MyRules)
-        .with_context(context)
-        .build()
-        .unwrap();
-    
-    let result = engine.replay(&transactions).unwrap();
-    
-    println!("Final balance: {}", result.final_state.balance);
-    println!("Final hash: {:?}", result.final_hash);
-}
-```
-
-## Core API
-
-### Traits
-
-#### `State`
-Represents the financial state at any point in time.
-
-```rust
-pub trait State: Clone + Serialize + DeserializeOwned + Hash {
-    fn validate(&self) -> Result<(), ValidationError>;
-}
-```
-
-#### `Transaction`
-Represents an immutable financial transaction event.
-
-```rust
-pub trait Transaction: Clone + Serialize + DeserializeOwned {
-    fn id(&self) -> &str;
-    fn timestamp(&self) -> DateTime<Utc>;
-    fn validate(&self) -> Result<(), ValidationError>;
-}
-```
-
-#### `RuleSet`
-Defines business logic for processing transactions.
-
-```rust
-pub trait RuleSet<S, T> {
-    fn version(&self) -> Version;
-    fn apply(&self, state: &S, transaction: &T, context: &ExecutionContext) 
-        -> Result<S, ProcessingError>;
-}
-```
-
-### Core Types
-
-#### `ReplayEngine<S, T, R>`
-The main engine for replaying transaction sequences.
-
-**Methods:**
-- `replay(&self, transactions: &[T]) -> Result<ReplayResult<S>, ProcessingError>`
-- `replay_with_checkpoints(&self, transactions: &[T], interval: usize) -> Result<ReplayResult<S>, ProcessingError>`
-- `replay_parallel(&self, transactions: &[T]) -> Result<ReplayResult<S>, ProcessingError>`
-
-#### `ReplayEngineBuilder<S, T, R>`
-Builder for constructing replay engines with fluent API.
-
-**Methods:**
-- `new() -> Self`
-- `with_initial_state(self, state: S) -> Self`
-- `with_rule_set(self, rules: R) -> Self`
-- `with_context(self, context: ExecutionContext) -> Self`
-- `with_checkpoint_interval(self, interval: usize) -> Self`
-- `build(self) -> Result<ReplayEngine<S, T, R>, ValidationError>`
-
-#### `ExecutionContext`
-Provides controlled access to external dependencies.
-
-**Methods:**
-- `new(time: DateTime<Utc>, seed: u64) -> Self`
-- `now(&self) -> DateTime<Utc>`
-- `random(&mut self) -> &mut SeededRandom`
-- `get_external_fact<T>(&self, key: &str) -> Option<&T>`
-- `add_external_fact<T>(&mut self, key: String, value: T)`
-
-#### `StateHasher`
-Computes cryptographic hashes of states using Blake3.
-
-**Methods:**
-- `new() -> Self`
-- `hash<S: State>(&self, state: &S) -> StateHash`
-- `hash_chain(&self, hashes: &[StateHash]) -> StateHash`
-
-#### `StateManager<S>`
-Manages state transitions and checkpoints.
-
-**Methods:**
-- `new(initial_state: S) -> Self`
-- `apply_transaction<T, R>(&mut self, transaction: &T, rules: &R, context: &ExecutionContext) -> Result<StateTransition<S>, ProcessingError>`
-- `create_checkpoint(&self) -> Checkpoint<S>`
-- `restore_checkpoint(&mut self, checkpoint: &Checkpoint<S>) -> Result<(), StateError>`
-- `calculate_diff(&self, other: &S) -> StateDiff<S>`
-
-#### `VersionedRuleSet<S, T>`
-Wrapper for rule sets with version metadata.
-
-**Methods:**
-- `new(version: Version, rules: Box<dyn RuleSet<S, T>>, metadata: RuleSetMetadata) -> Self`
-- `version(&self) -> &Version`
-- `apply(&self, state: &S, transaction: &T, context: &ExecutionContext) -> Result<S, ProcessingError>`
-
-#### `RuleSetRegistry<S, T>`
-Registry for managing multiple rule set versions.
-
-**Methods:**
-- `new() -> Self`
-- `register(&mut self, rule_set: VersionedRuleSet<S, T>) -> Result<(), RegistrationError>`
-- `get(&self, version: &Version) -> Option<&VersionedRuleSet<S, T>>`
-- `list_versions(&self) -> Vec<&Version>`
-
-#### `ResultComparator`
-Compares replay results across different rule versions.
-
-**Methods:**
-- `compare<S>(&self, result1: &ReplayResult<S>, result2: &ReplayResult<S>) -> ResultComparison<S>`
-- `analyze_impact<S>(&self, results: &[ReplayResult<S>]) -> ImpactAnalysis<S>`
-
-### Result Types
-
-#### `ReplayResult<S>`
-Contains the complete result of a replay operation.
-
-**Fields:**
-- `final_state: S` - The final state after all transactions
-- `final_hash: StateHash` - Cryptographic hash of the final state
-- `execution_trace: ExecutionTrace` - Complete trace of execution
-- `performance_metrics: PerformanceMetrics` - Performance statistics
-- `checkpoints: Vec<CheckpointInfo>` - Checkpoint information
-
-#### `ExecutionTrace`
-Detailed trace of replay execution.
-
-**Fields:**
-- `transactions_processed: usize` - Number of transactions processed
-- `state_transitions: Vec<StateTransition<S>>` - All state transitions
-- `rule_applications: Vec<RuleApplication>` - Rule application history
-- `errors: Vec<ErrorContext>` - Any errors encountered
-
-#### `StateTransition<S>`
-Represents a single state transition.
-
-**Fields:**
-- `from_state: S` - State before transition
-- `to_state: S` - State after transition
-- `from_hash: StateHash` - Hash of from_state
-- `to_hash: StateHash` - Hash of to_state
-- `transaction_id: String` - ID of transaction that caused transition
-
-### Error Types
-
-#### `DTREError`
-Top-level error type for all DTRE operations.
-
-**Variants:**
-- `Processing(ProcessingError)` - Transaction processing errors
-- `Validation(ValidationError)` - State/transaction validation errors
-- `State(StateError)` - State management errors
-- `Rule(RuleError)` - Rule set errors
-- `Serialization(SerializationError)` - Serialization errors
-
-#### `ProcessingError`
-Errors during transaction processing.
-
-**Variants:**
-- `TransactionFailed { transaction_id: String, reason: String }`
-- `RuleApplicationFailed { rule_version: Version, details: String }`
-- `NonDeterministicOperation { operation: String, location: String }`
-
-#### `ValidationError`
-Validation errors for states and transactions.
-
-**Variants:**
-- `InvalidState { reason: String }`
-- `InvalidTransaction { reason: String }`
-- `InvalidRuleSet { reason: String }`
-
-## Advanced Features
-
-### Parallel Execution
-
-```rust
-let result = engine.replay_parallel(&transactions)?;
-// Results are guaranteed to match sequential execution
-```
-
-### Checkpointing
-
-```rust
-let engine = ReplayEngineBuilder::new()
-    .with_initial_state(initial_state)
-    .with_rule_set(rules)
-    .with_context(context)
-    .with_checkpoint_interval(1000) // Checkpoint every 1000 transactions
-    .build()?;
-
-let result = engine.replay(&transactions)?;
-```
-
-### Rule Migration Analysis
-
-```rust
-let result_v1 = engine_v1.replay(&transactions)?;
-let result_v2 = engine_v2.replay(&transactions)?;
-
-let comparator = ResultComparator::new();
-let comparison = comparator.compare(&result_v1, &result_v2);
-
-println!("State differences: {:?}", comparison.state_differences);
-println!("Balance differences: {:?}", comparison.balance_differences);
-```
-
-### External Facts
-
-```rust
-let mut context = ExecutionContext::new(Utc::now(), 42);
-context.add_external_fact("exchange_rate".to_string(), 1.25);
-context.add_external_fact("fee_schedule".to_string(), fee_schedule);
-
-let engine = ReplayEngineBuilder::new()
-    .with_context(context)
-    // ... other configuration
-    .build()?;
-```
-
-### Deterministic Logging
-
-```rust
-use dtre::{DeterministicLogger, LogLevel};
-
-let mut logger = DeterministicLogger::new();
-logger.log(LogLevel::Info, "Processing transaction", &context);
-
-// Logs don't affect determinism
-let trace = logger.get_trace();
-```
-
-## Testing
-
-The library includes comprehensive test coverage:
-
-- **Unit Tests**: 49 tests covering core functionality
-- **Integration Tests**: 13 tests for end-to-end scenarios
-- **Property-Based Tests**: 36 properties tested with 100+ iterations each
-
-Run tests:
-
-```bash
-cargo test --all
-```
-
-Run benchmarks:
-
-```bash
-cargo bench
-```
-
-## Performance
-
-Benchmarks on a typical development machine:
-
-- Small sequences (10-100 transactions): ~50-550 µs
-- Large sequences (1000-10000 transactions): ~45-500 ms
-- State hashing (1000 accounts): ~1-2 ms
-- Parallel execution: Near-linear scaling with cores
-
-## Examples
-
-See the `examples/` directory for complete examples:
-
-- `bank_transfer.rs` - Bank account transfers with fee calculation
-- Integration tests demonstrate trading systems, audit trails, and rule migration
-
-## Requirements
-
-- Rust 1.70 or later
-- Dependencies:
-  - `serde` 1.0 - Serialization
-  - `blake3` 1.5 - Cryptographic hashing
-  - `chrono` 0.4 - Date/time handling
-  - `rayon` 1.8 - Parallel execution
-  - `bincode` 1.3 - Binary serialization
-
-## License
-
-This project is licensed under the MIT License.
-
-## Contributing
-
-Contributions are welcome! Please ensure:
-
-1. All tests pass (`cargo test --all`)
-2. Code is formatted (`cargo fmt`)
-3. No clippy warnings (`cargo clippy`)
-4. Property tests pass consistently
+**AI Response:** Settlement timing mismatch (92% confidence) - transaction submitted at 23:58 UTC after the 23:00 cutoff, will appear in next settlement report.
 
 ## Architecture
 
-The DTRE follows a layered architecture:
+```
+Operator Query → Go API (8080) → PostgreSQL + pgvector
+                      ↓
+              Python AI Service (8000)
+              • LangGraph workflow (7 nodes)
+              • RAG retrieval
+              • OpenAI GPT-4
+```
 
-1. **API Layer**: Builder pattern and fluent API
-2. **Execution Layer**: Transaction processing and rule application
-3. **Verification Layer**: State hashing and diff calculation
-4. **Storage Layer**: Serialization and checkpoint management
+## Technology Stack
 
-All components are designed for determinism, immutability, and pure functional programming.
+- **Backend API**: Go 1.21+ with Gin, PostgreSQL driver, OpenTelemetry
+- **AI Service**: Python 3.11+ with FastAPI, LangGraph, LangChain, pgvector
+- **Database**: PostgreSQL 16 with pgvector extension
+- **Embeddings & LLM**: OpenAI (text-embedding-ada-002, GPT-4)
+- **Observability**: OpenTelemetry + Jaeger
+- **Transaction Replay**: Rust DTRE library (FFI integration)
 
-## Support
 
-For issues, questions, or contributions, please visit the project repository.
+## Prerequisites
+
+- Docker and Docker Compose
+- OpenAI API key
+- (Optional) LangSmith API key for LLM tracing
+
+## Quick Start
+
+### 1. Environment Setup
+
+```bash
+cp .env.example .env
+# Edit .env and add your OpenAI API key
+```
+
+### 2. Start Services
+
+```bash
+docker-compose up --build
+```
+
+Services:
+- PostgreSQL with pgvector (port 5432)
+- Go API (port 8080)
+- Python AI service (port 8000)
+- Jaeger UI (port 16686)
+
+### 3. Run Investigation
+
+```bash
+curl -X POST http://localhost:8080/api/v1/investigations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "Why is TXN-20261109-001 successful internally but missing from settlement report?",
+    "transaction_id": "TXN-20261109-001"
+  }'
+```
+
+## Project Structure
+
+```
+transaction-api/          # Go API service
+  cmd/api-server/        # Main entry point
+  internal/
+    api/handlers/        # HTTP handlers
+    repository/postgres/ # Database access
+    ai/client/          # Python AI client
+
+investigation-agent/      # Python AI service
+  app/
+    agent/              # LangGraph workflow
+      graph.py          # Agent orchestration
+      nodes.py          # 7 investigation nodes
+    rag/                # RAG pipeline
+      vectorstore.py    # pgvector integration
+      embeddings.py     # OpenAI embeddings
+
+src/ffi/                  # Rust DTRE FFI layer
+migrations/               # Database migrations
+```
+
+## LangGraph Agent Workflow
+
+7-node investigation pipeline:
+
+1. **analyze_transaction** - Parse data, identify discrepancy type
+2. **check_settlement_timing** - Compare timestamps vs cutoffs
+3. **search_similar_incidents** - Vector search historical incidents
+4. **retrieve_documentation** - Vector search network docs
+5. **analyze_dtre_replay** - Interpret replay verification
+6. **synthesize_findings** - LLM correlates evidence
+7. **generate_recommendations** - Produce action items
+
+## Database Schema
+
+**Core tables:**
+- `transactions` - Internal records
+- `settlements` - Daily reports from payment networks
+- `settlement_items` - Individual settlement line items
+- `audit_logs` - DTRE audit trail
+- `incidents` - Historical incidents (RAG)
+- `documentation` - Provider documentation (RAG)
+- `embeddings` - Vector embeddings (1536d, pgvector)
+- `investigations` - Investigation tracking
+
+## Observability
+
+Jaeger UI: `http://localhost:16686`
+
+Distributed traces span:
+- Go API → PostgreSQL
+- Go API → Python AI service  
+- Python AI → OpenAI API
+- LangGraph agent execution
+
+## Development
+
+### Local Development (without Docker)
+
+**Go API:**
+```bash
+cd transaction-api
+export DATABASE_URL="postgresql://dbuser:dbpass@localhost:5432/transaction_investigation"
+export PYTHON_AI_SERVICE_URL="http://localhost:8000"
+go run cmd/api-server/main.go
+```
+
+**Python AI:**
+```bash
+cd investigation-agent
+pip install -r requirements.txt
+export DATABASE_URL="postgresql://dbuser:dbpass@localhost:5432/transaction_investigation"
+export OPENAI_API_KEY="sk-..."
+uvicorn app.main:app --port 8000
+```
+
+### Testing
+
+```bash
+# Go tests
+cd transaction-api && go test ./...
+
+# Python tests
+cd investigation-agent && pytest
+```
+
+## API Reference
+
+### POST /api/v1/investigations
+
+**Request:**
+```json
+{
+  "query": "Why is TXN-X missing?",
+  "transaction_id": "TXN-X"
+}
+```
+
+**Response:**
+```json
+{
+  "investigation_id": "uuid",
+  "status": "success",
+  "findings": {
+    "primary_issue": "Settlement timing mismatch",
+    "confidence": 0.92,
+    "summary": "..."
+  },
+  "evidence": [...],
+  "recommendations": [...],
+  "agent_trace": {...}
+}
+```
+
+## Rust DTRE Library
+
+The `src/` directory contains the Deterministic Transaction Replay Engine - a Rust library for cryptographically verifiable transaction replay. It provides:
+
+- Deterministic execution with Blake3 hashing
+- Rule versioning and migration analysis
+- Parallel replay with consistency guarantees
+- FFI layer ([src/ffi/mod.rs](src/ffi/mod.rs)) for Go integration
+
+See `examples/bank_transfer.rs` for usage.
+
+## Production Considerations
+
+- **Security**: JWT auth, rate limiting, input validation
+- **Error Handling**: Circuit breakers, exponential backoff
+- **Performance**: Connection pooling, database indexes, LLM streaming
+- **Observability**: Structured logging, metrics, distributed tracing
+
+## License
+
+MIT
+
+## Contributing
+
+Contributions welcome! Open an issue or PR.
