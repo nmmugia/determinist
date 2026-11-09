@@ -3,6 +3,9 @@ name = "dtre"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+crate-type = ["lib", "cdylib"]
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -14,6 +17,10 @@ hex = "0.4"
 rand = "0.8"
 rand_chacha = "0.3"
 rayon = "1.8"
+
+[features]
+default = ["ffi"]
+ffi = []
 
 [dev-dependencies]
 proptest = "1.4"

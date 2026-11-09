@@ -15,6 +15,10 @@ pub mod traits;
 pub mod transaction_processor;
 pub mod types;
 
+// FFI module for C interoperability (CGO)
+#[cfg(feature = "ffi")]
+pub mod ffi;
+
 // Re-export core types and traits
 pub use context::{
     ExecutionContext, DeterministicTime, SeededRandom, ExternalFacts, ExternalFact, 

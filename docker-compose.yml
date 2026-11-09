@@ -1,0 +1,92 @@
+version: '3.9'
+
+services:
+  # PostgreSQL database with pgvector extension
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: transaction-investigation-db
+    environment:
+      POSTGRES_DB: transaction_investigation
+      POSTGRES_USER: dbuser
+      POSTGRES_PASSWORD: dbpass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dbuser -d transaction_investigation"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - investigation-network
+
+  # Go API service for transaction data access
+  go-api:
+    build:
+      context: ./transaction-api
+      dockerfile: Dockerfile
+    container_name: transaction-investigation-api
+    environment:
+      DATABASE_URL: postgresql://dbuser:dbpass@postgres:5432/transaction_investigation?sslmode=disable
+      PYTHON_AI_SERVICE_URL: http://python-ai:8000
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      OTEL_SERVICE_NAME: transaction-api
+      RUST_LIB_PATH: /usr/local/lib/libdtre.so
+      PORT: 8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./target/release/libdtre.so:/usr/local/lib/libdtre.so:ro
+    networks:
+      - investigation-network
+    restart: unless-stopped
+
+  # Python AI service with LangGraph agent orchestration
+  python-ai:
+    build:
+      context: ./investigation-agent
+      dockerfile: Dockerfile
+    container_name: transaction-investigation-ai
+    environment:
+      DATABASE_URL: postgresql://dbuser:dbpass@postgres:5432/transaction_investigation?sslmode=disable
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: transaction-investigation
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      OTEL_SERVICE_NAME: investigation-agent
+      PORT: 8000
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - investigation-network
+    restart: unless-stopped
+
+  # Jaeger for distributed tracing (OpenTelemetry)
+  jaeger:
+    image: jaegertracing/all-in-one:1.52
+    container_name: transaction-investigation-jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "4317:4317"    # OTLP gRPC receiver
+      - "4318:4318"    # OTLP HTTP receiver
+    networks:
+      - investigation-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  investigation-network:
+    driver: bridge
